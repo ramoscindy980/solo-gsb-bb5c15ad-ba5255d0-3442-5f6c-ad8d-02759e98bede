@@ -58,6 +58,7 @@
       <div class="tabs" role="tablist">
         <button class="tab active" id="tab-order" role="tab" aria-selected="true" type="button">顺序 <span id="order-count" class="count">0</span></button>
         <button class="tab" id="tab-excluded" role="tab" aria-selected="false" type="button">排除与诊断 <span id="excluded-count" class="count">0</span></button>
+        <button class="tab" id="tab-modal" role="tab" aria-selected="false" type="button">模态审计 <span id="modal-count" class="count">0</span></button>
         <button class="tab" id="tab-baseline" role="tab" aria-selected="false" type="button">基线对比 <span id="baseline-count" class="count">0</span></button>
       </div>
       <ol id="order-list" class="order-list" aria-label="Tab 顺序"></ol>
@@ -65,6 +66,17 @@
         <ul id="excluded-list" class="excluded-list"></ul>
         <h3>全局诊断</h3>
         <ul id="diagnostics-list" class="diagnostics-list"></ul>
+      </div>
+      <div id="modal-panel" class="modal-panel" hidden>
+        <div id="modal-head" class="modal-head"></div>
+        <h3>焦点循环路线（模态内 Tab 顺序）</h3>
+        <ol id="modal-cycle-list" class="modal-cycle-list"></ol>
+        <p id="modal-cycle-wrap" class="cycle-wrap"></p>
+        <h3>泄漏节点（模态外仍可 Tab 到达）</h3>
+        <ul id="modal-leak-list" class="modal-leak-list"></ul>
+        <h3>审计诊断</h3>
+        <ul id="modal-diagnostics-list" class="diagnostics-list"></ul>
+        <p id="modal-hint" class="diff-hint" role="status"></p>
       </div>
       <div id="baseline-panel" class="baseline-panel" hidden>
         <div class="baseline-toolbar">

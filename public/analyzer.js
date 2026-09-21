@@ -6,9 +6,13 @@
  *     推导文档中所有「候选可聚焦元素」的 Tab（Shift+Tab 为其逆序）顺序；
  *  2. 为每个节点生成稳定选择器与节点身份（唯一 id + 结构/属性指纹，
  *     供父页面「基线对比」跨版本匹配），并解释被排除或顺序异常的原因；
- *  3. 通过 postMessage 与父页面通信：上报路线、接收高亮指令、绘制高亮框。
+ *  3. 模态焦点陷阱审计：识别可见的 dialog[open] / aria-modal="true" 容器
+ *     （嵌套时只取最内层活动模态），把全局 Tab 顺序拆分为「模态内循环路线」
+ *     与「模态外泄漏节点」，并诊断无可聚焦项、缺少可访问名称等问题；
+ *  4. 通过 postMessage 与父页面通信：上报路线、接收高亮指令、绘制高亮框。
  *
- * 文件顶部的纯函数（parseTabIndexValue / computeOrder / buildDiagnostics）
+ * 文件顶部的纯函数（parseTabIndexValue / computeOrder / buildDiagnostics /
+ * pickActiveModal / computeModalCycle / buildModalDiagnostics）
  * 不依赖 DOM，会在 Node 环境下导出，供单元测试使用。
  */
 (function () {
@@ -152,13 +156,111 @@
     return diags;
   }
 
+  /* ---------------- 模态焦点陷阱审计（纯函数） ---------------- */
+
+  /**
+   * 从可见模态候选中选出「活动模态」的下标。
+   * 规则：嵌套时只取最内层（不包含其他候选者）；同级并列时取 DOM 序最后者
+   * （后出现的模态通常位于顶层）。候选数组须按文档序排列。
+   * @param {Array<{containsCandidate:boolean}>} candidates
+   * @returns {number} 活动模态下标，无可用候选时为 -1
+   */
+  function pickActiveModal(candidates) {
+    var pick = -1;
+    for (var i = 0; i < candidates.length; i++) {
+      if (candidates[i] && candidates[i].containsCandidate) continue;
+      pick = i;
+    }
+    return pick;
+  }
+
+  /**
+   * 依据全局 Tab 顺序拆分「模态内循环」与「模态外泄漏」。
+   * @param {Array<{status:string, inModal:boolean}>} entries 节点（仅需 status 与 inModal 字段）
+   * @param {number[]} order computeOrder 的结果（entries 下标数组）
+   * @returns {{cycle:number[], leaks:number[]}} 两组 entries 下标，均保持全局 Tab 顺序
+   */
+  function computeModalCycle(entries, order) {
+    var cycle = [];
+    var leaks = [];
+    for (var i = 0; i < order.length; i++) {
+      var idx = order[i];
+      var e = entries[idx];
+      if (!e || e.status !== 'ordered') continue;
+      if (e.inModal) cycle.push(idx); else leaks.push(idx);
+    }
+    return { cycle: cycle, leaks: leaks };
+  }
+
+  /**
+   * 模态焦点陷阱审计诊断（纯函数）。
+   * @param {{hasModal:boolean, kind:string, label:string, cycleCount:number,
+   *          leakCount:number, leakLabels:string[], hasAccessibleName:boolean,
+   *          candidateCount:number}} info
+   * @returns {Array<{level:string, code:string, message:string}>}
+   */
+  function buildModalDiagnostics(info) {
+    var diags = [];
+    if (!info || !info.hasModal) return diags;
+    var kindLabel = info.kind === 'dialog' ? '<dialog open>' : 'aria-modal="true"';
+
+    diags.push({
+      level: 'info',
+      code: 'modal-active',
+      message: '活动模态 ' + info.label + '（' + kindLabel + '）：模态内循环 ' +
+        info.cycleCount + ' 个节点，模态外泄漏 ' + info.leakCount + ' 个。'
+    });
+
+    if (info.cycleCount === 0) {
+      diags.push({
+        level: 'warn',
+        code: 'modal-no-focusable',
+        message: '活动模态内没有任何可 Tab 聚焦的元素，焦点陷阱无法形成循环，键盘用户将无法操作模态内容。'
+      });
+    }
+
+    if (!info.hasAccessibleName) {
+      diags.push({
+        level: 'warn',
+        code: 'modal-no-name',
+        message: '活动模态缺少可访问名称：请添加 aria-label 或 aria-labelledby（至少提供 title），否则屏幕阅读器用户无法理解该模态的用途。'
+      });
+    }
+
+    if (info.leakCount > 0) {
+      var labels = (info.leakLabels || []).slice(0, 5).join('，');
+      diags.push({
+        level: 'warn',
+        code: 'modal-leak',
+        message: info.leakCount + ' 个模态外节点仍可 Tab 到达（' + labels +
+          (info.leakCount > 5 ? ' 等' : '') + '），焦点可从模态中泄漏；' +
+          '应对模态外内容设置 inert 或移除其 Tab 可达性。' +
+          (info.kind === 'dialog'
+            ? '（若该 <dialog> 以 showModal() 打开，浏览器会自动屏蔽外部节点；此处按静态可聚焦性列出。）'
+            : '')
+      });
+    }
+
+    if (info.candidateCount > 1) {
+      diags.push({
+        level: 'info',
+        code: 'modal-multiple',
+        message: '检测到 ' + info.candidateCount + ' 个可见模态容器：嵌套时仅审计最内层，同级并列时取 DOM 序最后者。'
+      });
+    }
+    return diags;
+  }
+
   // Node 环境：导出纯函数供测试，随后退出（不触碰 DOM）。
   if (typeof window === 'undefined' || typeof document === 'undefined') {
     if (typeof module !== 'undefined' && module.exports) {
       module.exports = {
         parseTabIndexValue: parseTabIndexValue,
         computeOrder: computeOrder,
-        buildDiagnostics: buildDiagnostics
+        buildDiagnostics: buildDiagnostics,
+        pickActiveModal: pickActiveModal,
+        computeModalCycle: computeModalCycle,
+        buildModalDiagnostics: buildModalDiagnostics
       };
     }
     return;
@@ -544,6 +646,134 @@
     });
   }
 
+  /* ---------------- 模态焦点陷阱审计（DOM） ---------------- */
+
+  /** 容器可见性：hidden / inert 属性、display:none（自身或祖先）、visibility */
+  function isVisibleContainer(el) {
+    if (el.closest('[hidden]')) return false;
+    if (el.closest('[inert]')) return false;
+    var node = el;
+    while (node && node.nodeType === 1) {
+      if (getComputedStyle(node).display === 'none') return false;
+      node = node.parentElement;
+    }
+    var cs = getComputedStyle(el);
+    return cs.visibility !== 'hidden' && cs.visibility !== 'collapse';
+  }
+
+  /** 模态的可访问名称：aria-labelledby → aria-label → title */
+  function accessibleNameOf(el) {
+    var ids = (el.getAttribute('aria-labelledby') || '').trim();
+    if (ids) {
+      var text = ids.split(/\s+/).map(function (id) {
+        var t = document.getElementById(id);
+        return t ? (t.textContent || '') : '';
+      }).join(' ').replace(/\s+/g, ' ').trim();
+      if (text) return { name: text.slice(0, 80), source: 'aria-labelledby' };
+    }
+    var label = (el.getAttribute('aria-label') || '').trim();
+    if (label) return { name: label.slice(0, 80), source: 'aria-label' };
+    var title = (el.getAttribute('title') || '').trim();
+    if (title) return { name: title.slice(0, 80), source: 'title' };
+    return { name: null, source: null };
+  }
+
+  /**
+   * 模态焦点陷阱审计：
+   *  1. 找出可见的 dialog[open] / [aria-modal="true"] 容器；
+   *  2. 嵌套时仅取最内层、同级并列取 DOM 序最后者作为活动模态；
+   *  3. 模态内可 Tab 节点按全局顺序形成「循环路线」，模态外仍可 Tab 到达的
+   *     节点记为「泄漏」；并诊断「无可聚焦项」「缺少可访问名称」等问题。
+   */
+  function computeModalAudit() {
+    var found = document.querySelectorAll('dialog[open], [aria-modal="true"]');
+    var candidates = [];
+    var i, a, b;
+    for (i = 0; i < found.length; i++) {
+      var el = found[i];
+      if (!isVisibleContainer(el)) continue;
+      candidates.push({ el: el, kind: el.tagName === 'DIALOG' ? 'dialog' : 'aria-modal' });
+    }
+    // 嵌套标记：包含其他候选的容器不是「最内层」
+    for (a = 0; a < candidates.length; a++) {
+      candidates[a].containsCandidate = false;
+      for (b = 0; b < candidates.length; b++) {
+        if (a !== b && candidates[a].el.contains(candidates[b].el)) {
+          candidates[a].containsCandidate = true;
+          break;
+        }
+      }
+    }
+    var activeIdx = pickActiveModal(candidates);
+    var audit = {
+      activeModal: null,
+      cycle: [],
+      leaks: [],
+      diagnostics: [],
+      candidates: candidates.map(function (c, i2) {
+        return {
+          kind: c.kind,
+          label: describe(c.el).css,
+          selector: stableSelector(c.el),
+          audited: i2 === activeIdx
+        };
+      })
+    };
+    if (activeIdx < 0) return audit;
+
+    var active = candidates[activeIdx];
+    var flagged = entries.map(function (e) {
+      return { status: e.status, inModal: !!(e.el && active.el.contains(e.el)) };
+    });
+    var cl = computeModalCycle(flagged, order);
+    var stepOf = {};
+    for (i = 0; i < order.length; i++) stepOf[order[i]] = i + 1;
+    var nameInfo = accessibleNameOf(active.el);
+    var d = describe(active.el);
+
+    audit.activeModal = {
+      kind: active.kind,
+      label: d.css,
+      text: d.text,
+      selector: stableSelector(active.el),
+      identity: computeIdentity(active.el),
+      accessibleName: nameInfo.name,
+      nameSource: nameInfo.source
+    };
+    audit.cycle = cl.cycle.map(function (idx, i3) {
+      var e = entries[idx];
+      return {
+        cycleStep: i3 + 1,
+        step: stepOf[idx],
+        selector: e.selector,
+        label: e.label,
+        text: e.text,
+        tabIndex: e.tabIndex
+      };
+    });
+    audit.leaks = cl.leaks.map(function (idx) {
+      var e = entries[idx];
+      return {
+        step: stepOf[idx],
+        selector: e.selector,
+        label: e.label,
+        text: e.text,
+        tabIndex: e.tabIndex
+      };
+    });
+    audit.diagnostics = buildModalDiagnostics({
+      hasModal: true,
+      kind: active.kind,
+      label: d.css,
+      cycleCount: audit.cycle.length,
+      leakCount: audit.leaks.length,
+      leakLabels: audit.leaks.map(function (l) { return l.label; }),
+      hasAccessibleName: !!nameInfo.name,
+      candidateCount: candidates.length
+    });
+    return audit;
+  }
+
   function computeAndSend() {
     try {
       buildEntries();
@@ -570,6 +800,7 @@
           entries: serialized,
           order: order.map(function (idx) { return serialized[idx].selector; }),
           diagnostics: diagnostics,
+          modalAudit: computeModalAudit(),
           stats: {
             candidates: entries.length,
             ordered: order.length,
@@ -627,34 +858,47 @@
 
   /**
    * 按稳定选择器高亮任意候选节点（含被排除 / 仅编程聚焦者，虚线框展示）。
-   * 供父页面「基线对比」差异项点击联动：差异节点可能不在 Tab 顺序中，
-   * 无法按步进序号定位。
+   * 供父页面「基线对比」差异项与「模态审计」条目点击联动：差异节点可能不在
+   * Tab 顺序中，无法按步进序号定位。
+   * opts.badge 自定义角标文本；opts.solid 使用实线框（默认虚线）。
+   * 目标不是候选节点时（如模态容器本身），回退为按选择器直接定位。
    */
-  function highlightNodeBySelector(selector) {
+  function highlightNodeBySelector(selector, opts) {
+    opts = opts || {};
     var entry = null;
     for (var i = 0; i < entries.length; i++) {
       if (entries[i].selector === selector) { entry = entries[i]; break; }
     }
-    if (!entry || !entry.el || !entry.el.isConnected) {
+    var el = entry && entry.el;
+    if (!el || !el.isConnected) {
+      el = null;
+      try { el = document.querySelector(selector); } catch (err) { el = null; }
+    }
+    if (!el || !el.isConnected) {
       post({ type: 'highlight-miss', selector: selector });
       return;
     }
     ensureOverlay();
-    var el = entry.el;
     try { el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) { /* 忽略 */ }
     var r = el.getBoundingClientRect();
     overlay.style.display = 'block';
-    overlay.style.borderStyle = 'dashed';
+    overlay.style.borderStyle = opts.solid ? 'solid' : 'dashed';
     overlay.style.left = (r.left + window.pageXOffset - 3) + 'px';
     overlay.style.top = (r.top + window.pageYOffset - 3) + 'px';
     overlay.style.width = Math.max(r.width, 4) + 6 + 'px';
     overlay.style.height = Math.max(r.height, 4) + 6 + 'px';
-    var oi = order.indexOf(entries.indexOf(entry));
-    if (oi >= 0) {
-      badge.textContent = 'Tab ' + (oi + 1) + ' / ' + order.length;
+    if (opts.badge) {
+      badge.textContent = opts.badge;
+    } else if (entry) {
+      var oi = order.indexOf(entries.indexOf(entry));
+      if (oi >= 0) {
+        badge.textContent = 'Tab ' + (oi + 1) + ' / ' + order.length;
+      } else {
+        var STATUS_BADGE = { excluded: '已排除', programmatic: '仅编程聚焦', 'not-focusable': '不可聚焦' };
+        badge.textContent = STATUS_BADGE[entry.status] || entry.status;
+      }
     } else {
-      var STATUS_BADGE = { excluded: '已排除', programmatic: '仅编程聚焦', 'not-focusable': '不可聚焦' };
-      badge.textContent = STATUS_BADGE[entry.status] || entry.status;
+      badge.textContent = '元素';
     }
     currentStep = -1;
     post({ type: 'highlighted', step: -1, selector: selector });
@@ -668,7 +912,7 @@
     if (d.type === 'highlight') {
       highlightStep(d.step);
     } else if (d.type === 'highlight-node') {
-      highlightNodeBySelector(d.selector);
+      highlightNodeBySelector(d.selector, { badge: d.badge, solid: d.solid });
     } else if (d.type === 'clear') {
       clearHighlight();
     } else if (d.type === 'recompute') {

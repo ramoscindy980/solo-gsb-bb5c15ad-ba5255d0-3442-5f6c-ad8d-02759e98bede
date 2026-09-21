@@ -24,6 +24,7 @@ async function check(name, fn) {
     if (!res.ok) throw new Error('status ' + res.status);
     const body = await res.text();
     if (!body.includes('键盘焦点路线实验室')) throw new Error('缺少页面标题');
+    if (!body.includes('模态审计')) throw new Error('缺少模态审计标签页');
   });
 
   await check('GET /analyzer.js 可加载', async () => {
@@ -31,6 +32,7 @@ async function check(name, fn) {
     if (!res.ok) throw new Error('status ' + res.status);
     const body = await res.text();
     if (!body.includes('computeOrder')) throw new Error('分析脚本内容异常');
+    if (!body.includes('computeModalCycle')) throw new Error('缺少模态审计逻辑');
   });
 
   await check('GET /diff.js 可加载', async () => {

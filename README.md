@@ -5,7 +5,9 @@
 DOM 嵌套（`details`、`fieldset[disabled]` 等）推导 **Tab / Shift+Tab 焦点顺序**，
 逐步高亮节点，并解释元素被排除或顺序异常的原因。编辑内容后按**稳定选择器**恢复当前位置并重算路线，
 可将当前结果**钉为基线**，后续重算自动按**节点身份**对比前后路线（新增 / 移除 / 移位 / 状态切换），
-可一键导出「节点 / 顺序 / 诊断 / 基线对比」JSON 报告。
+并对可见的 `dialog[open]` / `aria-modal="true"` 容器做**模态焦点陷阱审计**
+（活动模态身份、模态内焦点循环、模态外泄漏节点、无可聚焦项 / 缺少可访问名称诊断），
+可一键导出「节点 / 顺序 / 诊断 / 基线对比 / 模态审计」JSON 报告。
 
 ## 快速开始（Docker）
 
@@ -72,21 +74,36 @@ npm run smoke      # 冒烟测试（需服务已启动）
   某类身份在两侧各出现恰好一次才视为匹配；在任一侧出现多次即为**歧义**，
   对应节点被明确标记为「未匹配」，不计入新增 / 移除。
   （`identity.path` 仍会导出 nth-of-type 结构路径，仅供排查展示，不参与匹配。）
+- **模态焦点陷阱审计**：自动识别预览中**可见**的 `dialog[open]` 与
+  `aria-modal="true"` 容器（`hidden` / `inert` / `display:none` / `visibility:hidden`
+  的容器不参与）；**嵌套时只审计最内层**活动模态，同级并列时取 DOM 序最后者。
+  「模态审计」标签页展示：
+  - **活动模态身份**：类型（`<dialog open>` / `aria-modal`）、稳定选择器、节点身份
+    （与基线对比同构的 uid / 指纹）与可访问名称（`aria-labelledby` → `aria-label` →
+    `title`），点击可高亮模态容器本身；
+  - **焦点循环路线**：模态内可 Tab 节点按全局 Tab 顺序形成的首尾循环，
+    标注「首 / 尾」节点并提示循环闭合方向，点击任一节点联动预览高亮
+    （实线框 + 「循环 i / n」角标）；
+  - **泄漏节点**：模态打开时仍可从模态外 Tab 到达的节点，点击以虚线框高亮；
+  - **审计诊断**：模态内无可聚焦项（无法形成循环）、缺少可访问名称、
+    焦点泄漏、多模态并存等。
 - **导出 JSON**：`POST /api/export` 返回 `Content-Disposition: attachment` 的报告文件；
   接口不可用时退化为浏览器本地下载。已钉基线时，报告包含
   `baselineComparison` 字段：`baseline` / `current` 摘要（时间、统计、节点数）、
   `summary`（各类差异计数）、`matches`（匹配结果及所用身份层级 `uid`/`fp`）与
-  `diffs`（逐条差异）。
+  `diffs`（逐条差异）。存在活动模态时，报告包含 `modalAudit` 字段：
+  `activeModal`（活动模态身份与可访问名称）、`cycle`（模态内循环顺序）、
+  `leaks`（泄漏节点）、`diagnostics`（审计诊断）与 `candidates`（全部可见模态候选）。
 
 ## 架构
 
 ```
 server.js                 Express：静态托管 + /api/health + /api/export
 public/index.html         应用外壳（编辑器 / 预览 / 结果三栏）
-public/app.js             父页面：净化、srcdoc 装配、postMessage 通信、渲染、基线面板、导出
-public/analyzer.js        注入 sandbox iframe：焦点模型计算、诊断、节点身份生成、高亮绘制
+public/app.js             父页面：净化、srcdoc 装配、postMessage 通信、渲染、基线面板、模态审计视图、导出
+public/analyzer.js        注入 sandbox iframe：焦点模型计算、诊断、节点身份生成、模态焦点陷阱审计、高亮绘制
 public/diff.js            基线对比纯函数：节点身份匹配（uid → 指纹 → 歧义未匹配）与差异计算
-test/analyzer.test.js     纯函数单元测试（tabindex 解析 / 排序 / 诊断）
+test/analyzer.test.js     纯函数单元测试（tabindex 解析 / 排序 / 诊断 / 模态审计）
 test/diff.test.js         基线对比单元测试（身份匹配 / 移位 / 状态切换 / 歧义）
 test/smoke.js             冒烟测试
 Dockerfile                node:20-alpine，npm install --omit=dev

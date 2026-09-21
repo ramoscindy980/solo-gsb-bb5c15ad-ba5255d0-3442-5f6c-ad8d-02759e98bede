@@ -297,3 +297,29 @@ textarea:focus { outline: 2px solid var(--accent-2); outline-offset: -1px; }
   font-size: 12px;
   color: var(--accent-2);
 }
+
+/* ---------------- 模态焦点陷阱审计 ---------------- */
+
+/* 面板整体滚动：不设 display，确保 hidden 属性能正常隐藏面板 */
+.modal-panel { flex: 1; min-height: 0; overflow-y: auto; }
+.modal-panel h3 { font-size: 13px; color: var(--muted); margin: 12px 0 6px; }
+.modal-head { margin-bottom: 4px; }
+
+.modal-cycle-list, .modal-leak-list {
+  margin: 0;
+  padding: 0 0 0 4px;
+  list-style: none;
+}
+
+.cycle-wrap { margin: 4px 0 0; font-size: 12px; color: var(--accent-2); }
+.cycle-wrap:empty { display: none; }
+
+.modal-head-item { cursor: pointer; }
+.modal-name { display: block; margin-top: 2px; font-size: 12px; color: var(--ok); }
+.modal-name.missing { color: var(--warn); }
+
+.badge.kind { background: #2d2440; color: #c792ea; }
+.badge.endpoint { background: #12352b; color: var(--ok); }
+.badge.leak { background: #3a2333; color: var(--accent); }
+
+.modal-panel .node-item.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }

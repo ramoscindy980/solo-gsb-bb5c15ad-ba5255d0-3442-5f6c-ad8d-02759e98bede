@@ -10,7 +10,10 @@
  *  5. 基线对比（diff.js）：钉住当前结果为基线，重算后按节点身份
  *     （唯一 id + 结构/属性指纹）匹配前后路线，展示新增 / 移除 / 移位 /
  *     状态切换与未匹配项，点击差异项联动预览高亮；
- *  6. 汇总报告（含基线摘要、匹配结果与差异）经 POST /api/export 导出为 JSON 附件。
+ *  6. 模态焦点陷阱审计：展示活动模态身份、模态内焦点循环路线、模态外
+ *     泄漏节点与审计诊断，点击循环 / 泄漏节点联动预览高亮；
+ *  7. 汇总报告（含基线摘要、匹配结果与差异、模态审计）经 POST /api/export
+ *     导出为 JSON 附件。
  */
 (function () {
   'use strict';
@@ -46,7 +49,16 @@
     baselineMeta: document.getElementById('baseline-meta'),
     diffSummary: document.getElementById('diff-summary'),
     diffList: document.getElementById('diff-list'),
-    diffHint: document.getElementById('diff-hint')
+    diffHint: document.getElementById('diff-hint'),
+    tabModal: document.getElementById('tab-modal'),
+    modalPanel: document.getElementById('modal-panel'),
+    modalCount: document.getElementById('modal-count'),
+    modalHead: document.getElementById('modal-head'),
+    modalCycleList: document.getElementById('modal-cycle-list'),
+    modalCycleWrap: document.getElementById('modal-cycle-wrap'),
+    modalLeakList: document.getElementById('modal-leak-list'),
+    modalDiagnosticsList: document.getElementById('modal-diagnostics-list'),
+    modalHint: document.getElementById('modal-hint')
   };
 
   var state = {
@@ -59,7 +71,9 @@
     restoreSelector: null, // 待恢复的稳定选择器
     routeTimer: null,    // 路线响应超时计时器
     baseline: null,      // 已钉住的基线快照 { pinnedAt, stats, entries }
-    diff: null           // 最近一次基线对比结果（FocusDiff.diffRoutes 返回值）
+    diff: null,          // 最近一次基线对比结果（FocusDiff.diffRoutes 返回值）
+    modalAudit: null,    // 最近一次模态焦点陷阱审计结果
+    highlightOrigin: null // 最近一次 highlight-node 请求来源（'diff' / 'modal'），用于定位高亮失败提示
   };
 
   /* ---------------- 示例输入 ---------------- */
@@ -90,6 +104,12 @@
     '</fieldset>',
     '<a>没有 href 的链接（不可聚焦）</a>',
     '<div aria-hidden="true"><button>aria-hidden 内的可聚焦按钮</button></div>',
+    '<div role="dialog" aria-modal="true" aria-label="订阅确认" class="demo-modal">',
+    '  <p><strong>模态对话框</strong>：打开时模态外的节点即为「泄漏」</p>',
+    '  <input type="email" placeholder="邮箱地址">',
+    '  <button>确认订阅</button>',
+    '  <button>取消</button>',
+    '</div>',
     '<script>alert("这段用户脚本会被剥离，不会执行")<' + '/script>'
   ].join('\n');
 
@@ -97,6 +117,7 @@
     'body { font-family: sans-serif; padding: 12px; }',
     'button, a, input, summary, div[tabindex] { display: inline-block; margin: 4px; padding: 4px 8px; }',
     '.gone { display: none; }',
+    '.demo-modal { display: block; margin: 8px 0; padding: 10px; border: 2px solid #4f8cff; border-radius: 6px; background: #eef4ff; }',
     ':focus { outline: 2px dashed #4f8cff; }'
   ].join('\n');
 
@@ -191,7 +212,10 @@
       state.currentStep = d.step;
       updateStepUI();
     } else if (d.type === 'highlight-miss') {
-      setDiffHint('未能在当前预览中定位该节点（可能刚被移除或选择器已变化）。');
+      var missText = '未能在当前预览中定位该节点（可能刚被移除或选择器已变化）。';
+      if (state.highlightOrigin === 'modal') setModalHint(missText);
+      else setDiffHint(missText);
+      state.highlightOrigin = null;
     } else if (d.type === 'error') {
       clearTimeout(state.routeTimer);
       setStatus('分析脚本错误：' + d.message, 'err');
@@ -202,6 +226,7 @@
     state.entries = payload.entries || [];
     state.order = payload.order || [];
     state.diagnostics = payload.diagnostics || [];
+    state.modalAudit = payload.modalAudit || null;
     state.stats = payload.stats || null;
     state.currentStep = -1;
     renderResults();
@@ -357,6 +382,199 @@
       li.textContent = (dg.level === 'warn' ? '⚠ ' : 'ℹ ') + dg.message;
       els.diagnosticsList.appendChild(li);
     });
+
+    renderModalAudit();
+  }
+
+  /* ---------------- 模态焦点陷阱审计 ---------------- */
+
+  function setModalHint(text) {
+    els.modalHint.textContent = text || '';
+  }
+
+  function clearModalActive() {
+    var all = els.modalPanel.querySelectorAll('.node-item.active');
+    for (var i = 0; i < all.length; i++) all[i].classList.remove('active');
+  }
+
+  /** 模态审计列表项（循环 / 泄漏共用）：序号 + 标签 + 徽章 + 选择器 + 文本，点击联动高亮 */
+  function modalNodeButton(opts) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'node-item';
+
+    var line = document.createElement('span');
+    var no = document.createElement('span');
+    no.className = 'step-no';
+    no.textContent = opts.no;
+    line.appendChild(no);
+    line.appendChild(document.createTextNode(' ' + opts.label));
+    (opts.badges || []).forEach(function (b) {
+      var s = document.createElement('span');
+      s.className = 'badge' + (b.cls ? ' ' + b.cls : '');
+      s.textContent = b.text;
+      line.appendChild(s);
+    });
+    btn.appendChild(line);
+
+    var sel = document.createElement('span');
+    sel.className = 'sel';
+    sel.textContent = opts.selector;
+    btn.appendChild(sel);
+
+    if (opts.text) {
+      var t = document.createElement('span');
+      t.className = 'text';
+      t.textContent = '“' + opts.text + '”';
+      btn.appendChild(t);
+    }
+
+    btn.addEventListener('click', function () {
+      clearModalActive();
+      btn.classList.add('active');
+      opts.onClick();
+    });
+    return btn;
+  }
+
+  function renderModalAudit() {
+    var audit = state.modalAudit;
+    els.modalHead.innerHTML = '';
+    els.modalCycleList.innerHTML = '';
+    els.modalLeakList.innerHTML = '';
+    els.modalDiagnosticsList.innerHTML = '';
+    els.modalCycleWrap.textContent = '';
+    setModalHint('');
+
+    // 角标计数 = 泄漏节点数 + 警告级诊断数
+    var issueCount = 0;
+    if (audit && audit.activeModal) {
+      issueCount = audit.leaks.length +
+        audit.diagnostics.filter(function (d) { return d.level === 'warn'; }).length;
+    }
+    els.modalCount.textContent = String(issueCount);
+
+    if (!audit || !audit.activeModal) {
+      var tip = document.createElement('p');
+      tip.className = 'empty-tip';
+      tip.textContent = '未检测到可见的 dialog[open] 或 aria-modal="true" 模态容器，无需审计。';
+      els.modalHead.appendChild(tip);
+      return;
+    }
+
+    var am = audit.activeModal;
+
+    // 活动模态头部：类型 + 身份 + 可访问名称（点击高亮模态容器本身）
+    var head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'node-item modal-head-item';
+    var hline = document.createElement('span');
+    var kind = document.createElement('span');
+    kind.className = 'badge kind';
+    kind.textContent = am.kind === 'dialog' ? '<dialog open>' : 'aria-modal';
+    hline.appendChild(kind);
+    hline.appendChild(document.createTextNode(' ' + am.label));
+    head.appendChild(hline);
+    var nameLine = document.createElement('span');
+    nameLine.className = 'modal-name' + (am.accessibleName ? '' : ' missing');
+    nameLine.textContent = am.accessibleName
+      ? '可访问名称：“' + am.accessibleName + '”（' + am.nameSource + '）'
+      : '⚠ 缺少可访问名称（aria-label / aria-labelledby / title）';
+    head.appendChild(nameLine);
+    var hsel = document.createElement('span');
+    hsel.className = 'sel';
+    hsel.textContent = am.selector;
+    head.appendChild(hsel);
+    head.addEventListener('click', function () {
+      clearModalActive();
+      head.classList.add('active');
+      setModalHint('');
+      state.highlightOrigin = 'modal';
+      sendToFrame({ type: 'highlight-node', selector: am.selector, badge: '活动模态', solid: true });
+    });
+    els.modalHead.appendChild(head);
+
+    // 焦点循环路线：模态内可 Tab 节点按全局顺序形成的首尾循环
+    if (audit.cycle.length === 0) {
+      var liE = document.createElement('li');
+      liE.className = 'empty-tip';
+      liE.textContent = '模态内没有可 Tab 聚焦的元素，无法形成焦点循环。';
+      els.modalCycleList.appendChild(liE);
+    }
+    audit.cycle.forEach(function (node, i) {
+      var li = document.createElement('li');
+      var badges = [];
+      if (i === 0) badges.push({ cls: 'endpoint', text: audit.cycle.length === 1 ? '首/尾' : '首' });
+      if (i === audit.cycle.length - 1 && audit.cycle.length > 1) badges.push({ cls: 'endpoint', text: '尾' });
+      if (node.tabIndex > 0) badges.push({ cls: 'positive', text: 'tabindex=' + node.tabIndex });
+      var btn = modalNodeButton({
+        no: String(node.cycleStep),
+        label: node.label,
+        badges: badges,
+        selector: node.selector,
+        text: node.text,
+        onClick: function () {
+          setModalHint('');
+          state.highlightOrigin = 'modal';
+          sendToFrame({
+            type: 'highlight-node',
+            selector: node.selector,
+            badge: '循环 ' + node.cycleStep + ' / ' + audit.cycle.length,
+            solid: true
+          });
+        }
+      });
+      li.appendChild(btn);
+      els.modalCycleList.appendChild(li);
+    });
+    if (audit.cycle.length > 0) {
+      els.modalCycleWrap.textContent =
+        '↩ 循环闭合：末项按 Tab 应回到首项（第 1 项），首项按 Shift+Tab 应回到末项（第 ' +
+        audit.cycle.length + ' 项）。';
+    }
+
+    // 泄漏节点：模态外仍可 Tab 到达
+    if (audit.leaks.length === 0) {
+      var liL = document.createElement('li');
+      liL.className = 'empty-tip';
+      liL.textContent = '未发现泄漏：模态外没有可 Tab 到达的节点。';
+      els.modalLeakList.appendChild(liL);
+    }
+    audit.leaks.forEach(function (node) {
+      var li = document.createElement('li');
+      var btn = modalNodeButton({
+        no: String(node.step),
+        label: node.label,
+        badges: [{ cls: 'leak', text: '泄漏' }],
+        selector: node.selector,
+        text: node.text,
+        onClick: function () {
+          setModalHint('');
+          state.highlightOrigin = 'modal';
+          sendToFrame({
+            type: 'highlight-node',
+            selector: node.selector,
+            badge: '泄漏 · Tab ' + node.step + ' / ' + state.order.length
+          });
+        }
+      });
+      li.appendChild(btn);
+      els.modalLeakList.appendChild(li);
+    });
+
+    // 审计诊断
+    if (audit.diagnostics.length === 0) {
+      var liD = document.createElement('li');
+      liD.className = 'empty-tip';
+      liD.textContent = '暂无审计诊断。';
+      els.modalDiagnosticsList.appendChild(liD);
+    }
+    audit.diagnostics.forEach(function (dg) {
+      var li = document.createElement('li');
+      li.className = 'diag ' + (dg.level === 'warn' ? 'warn' : 'info');
+      li.textContent = (dg.level === 'warn' ? '⚠ ' : 'ℹ ') + dg.message;
+      els.modalDiagnosticsList.appendChild(li);
+    });
   }
 
   function updateStepUI() {
@@ -473,6 +691,7 @@
   /** 点击差异项：联动当前预览高亮 */
   function onDiffItemClick(item) {
     var cur = item.current;
+    state.highlightOrigin = 'diff';
     if (cur && cur.step) {
       setDiffHint('');
       sendToFrame({ type: 'highlight', step: cur.step - 1 }); // step 为 1 基序号
@@ -639,6 +858,14 @@
         };
       }),
       diagnostics: state.diagnostics,
+      // 模态焦点陷阱审计：活动模态身份 / 循环顺序 / 泄漏节点 / 审计诊断（无活动模态时为 null）
+      modalAudit: state.modalAudit ? {
+        activeModal: state.modalAudit.activeModal,
+        cycle: state.modalAudit.cycle,
+        leaks: state.modalAudit.leaks,
+        diagnostics: state.modalAudit.diagnostics,
+        candidates: state.modalAudit.candidates
+      } : null,
       // 基线对比：基线摘要 + 匹配结果 + 差异（未钉基线时为 null）
       baselineComparison: state.diff ? {
         baseline: state.diff.baseline,
@@ -680,6 +907,7 @@
     var tabs = {
       order: [els.tabOrder, els.orderList],
       excluded: [els.tabExcluded, els.excludedPanel],
+      modal: [els.tabModal, els.modalPanel],
       baseline: [els.tabBaseline, els.baselinePanel]
     };
     Object.keys(tabs).forEach(function (name) {
@@ -691,6 +919,7 @@
   }
   els.tabOrder.addEventListener('click', function () { switchTab('order'); });
   els.tabExcluded.addEventListener('click', function () { switchTab('excluded'); });
+  els.tabModal.addEventListener('click', function () { switchTab('modal'); });
   els.tabBaseline.addEventListener('click', function () { switchTab('baseline'); });
 
   /* ---------------- 启动 ---------------- */
