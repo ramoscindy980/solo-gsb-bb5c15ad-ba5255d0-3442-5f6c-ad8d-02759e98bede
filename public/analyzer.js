@@ -152,13 +152,154 @@
     return diags;
   }
 
+  /**
+   * 模态焦点陷阱审计（纯函数，不依赖 DOM）。
+   *
+   * 入参由浏览器侧准备好：
+   * @param {object|null} modal 活动模态身份描述（null 表示当前没有可见模态）
+   * @param {boolean[]} inside 与 entries 等长，各候选节点是否位于活动模态子树内
+   * @param {Array} entries 全部候选节点（读取 status/selector/label/tag/text/tabIndex）
+   * @param {number[]} order computeOrder 的结果（entries 下标，即全局 Tab 顺序）
+   *
+   * 产出：
+   *  - cycle：模态内可 Tab 节点按顺序组成的「首 ↔ 尾」循环路线；
+   *  - leaks：模态外仍位于全局 Tab 顺序中的泄漏节点；
+   *  - diagnostics：无名称 / 内部无可聚焦项 / 泄漏 / 嵌套并列等诊断。
+   *
+   * @returns {{active:boolean, modal:(object|null), cycle:object, leaks:Array,
+   *            diagnostics:Array, stats:object}}
+   */
+  function computeModalAudit(modal, inside, entries, order) {
+    if (!modal) {
+      return {
+        active: false,
+        modal: null,
+        cycle: { nodes: [], first: null, last: null, wraps: false },
+        leaks: [],
+        diagnostics: [],
+        stats: { totalModals: 0, insideTabbable: 0, outsideTabbable: 0, insideProgrammatic: 0, insideExcluded: 0 }
+      };
+    }
+
+    function refNode(entryIdx, globalStep, position) {
+      var e = entries[entryIdx];
+      return {
+        position: position || null, // 模态内循环位序（1 基）；泄漏节点为 null
+        step: globalStep,           // 全局 Tab 序号（1 基）
+        selector: e.selector,
+        label: e.label,
+        tag: e.tag,
+        text: e.text || '',
+        tabIndex: e.tabIndex === undefined ? null : e.tabIndex
+      };
+    }
+
+    var cycleNodes = [];
+    var leaks = [];
+    for (var s = 0; s < order.length; s++) {
+      var idx = order[s];
+      if (inside[idx]) cycleNodes.push(refNode(idx, s + 1, cycleNodes.length + 1));
+      else leaks.push(refNode(idx, s + 1, null));
+    }
+
+    var insideProgrammatic = 0;
+    var insideExcluded = 0;
+    for (var i = 0; i < entries.length; i++) {
+      if (!inside[i]) continue;
+      if (entries[i].status === 'programmatic') insideProgrammatic++;
+      else if (entries[i].status === 'excluded') insideExcluded++;
+    }
+
+    // 标记循环首尾：单个节点时首=尾（Tab / Shift+Tab 都落在自身）
+    if (cycleNodes.length === 1) {
+      cycleNodes[0].edge = 'first-last';
+    } else if (cycleNodes.length > 1) {
+      cycleNodes[0].edge = 'first';
+      cycleNodes[cycleNodes.length - 1].edge = 'last';
+    }
+
+    var diagnostics = [];
+
+    if (modal.ancestorCount > 0) {
+      diagnostics.push({
+        level: 'info',
+        code: 'modal-nested',
+        message: '检测到 ' + modal.ancestorCount + ' 层外层模态嵌套，本次仅审计最内层活动模态「' +
+          modal.label + '」，外层模态不单独审计。'
+      });
+    }
+    if (modal.otherCount > 0) {
+      diagnostics.push({
+        level: 'info',
+        code: 'modal-multiple',
+        message: '另有 ' + modal.otherCount + ' 个与活动模态并列（非嵌套）的可见模态容器，按 DOM 顺序仅审计最后一个。'
+      });
+    }
+    if (!modal.accessibleName || !modal.accessibleName.has) {
+      diagnostics.push({
+        level: 'warn',
+        code: 'modal-no-name',
+        message: '活动模态缺少可访问名称：应为容器添加 aria-label，或用 aria-labelledby 关联可见标题' +
+          '（title 属性可作兜底），否则屏幕阅读器无法宣告对话框用途。'
+      });
+    }
+    var roleOk = modal.role === 'dialog' || modal.role === 'alertdialog';
+    if (modal.signals.indexOf('aria-modal="true"') >= 0 && !roleOk) {
+      diagnostics.push({
+        level: 'info',
+        code: 'modal-aria-modal-role',
+        message: 'aria-modal="true" 位于 role="' + (modal.role || '') + '" 的 <' + modal.tag +
+          '> 上；该属性应配合 role="dialog" / "alertdialog"（或原生 <dialog open>）使用。'
+      });
+    }
+    if (cycleNodes.length === 0) {
+      var emptyMsg = '模态内部没有任何可 Tab 聚焦的节点，焦点循环无法形成，打开模态时焦点将无处安放。';
+      if (insideProgrammatic > 0) {
+        emptyMsg += '（另有 ' + insideProgrammatic + ' 个 tabindex<0 节点只能经脚本聚焦，Tab 无法到达。）';
+      }
+      diagnostics.push({ level: 'warn', code: 'modal-empty', message: emptyMsg });
+    }
+    if (leaks.length > 0) {
+      var preview = leaks.slice(0, 5).map(function (n) { return n.label; }).join('，');
+      diagnostics.push({
+        level: 'warn',
+        code: 'modal-leak',
+        message: '静态分析下，模态外仍有 ' + leaks.length + ' 个节点可经 Tab 到达' +
+          (preview ? '（如 ' + preview + (leaks.length > 5 ? ' 等' : '') + '）' : '') +
+          '，焦点会泄漏出模态。原生 <dialog>.showModal() 会自动把外部子树置为 inert；' +
+          'aria-modal 仅是 ARIA 声明、浏览器不强制，需自行实现陷阱或将模态外部容器置为 inert。'
+      });
+    }
+
+    return {
+      active: true,
+      modal: modal,
+      cycle: {
+        nodes: cycleNodes,
+        first: cycleNodes.length ? cycleNodes[0].selector : null,
+        last: cycleNodes.length ? cycleNodes[cycleNodes.length - 1].selector : null,
+        wraps: cycleNodes.length > 0
+      },
+      leaks: leaks,
+      diagnostics: diagnostics,
+      stats: {
+        totalModals: modal.totalModals,
+        insideTabbable: cycleNodes.length,
+        outsideTabbable: leaks.length,
+        insideProgrammatic: insideProgrammatic,
+        insideExcluded: insideExcluded
+      }
+    };
+  }
+
   // Node 环境：导出纯函数供测试，随后退出（不触碰 DOM）。
   if (typeof window === 'undefined' || typeof document === 'undefined') {
     if (typeof module !== 'undefined' && module.exports) {
       module.exports = {
         parseTabIndexValue: parseTabIndexValue,
         computeOrder: computeOrder,
-        buildDiagnostics: buildDiagnostics
+        buildDiagnostics: buildDiagnostics,
+        computeModalAudit: computeModalAudit
       };
     }
     return;
@@ -455,6 +596,154 @@
     return { id: id, uid: uid, fp: fingerprint(el), path: domPath(el) };
   }
 
+  /* ---------------- 模态焦点陷阱审计（DOM 侧） ---------------- */
+
+  /** aria-modal 属性是否以「true」为唯一取值（忽略大小写与空白） */
+  function isAriaModalTrue(el) {
+    if (!el.hasAttribute('aria-modal')) return false;
+    var tokens = (el.getAttribute('aria-modal') || '').trim().toLowerCase().split(/\s+/);
+    return tokens.length === 1 && tokens[0] === 'true';
+  }
+
+  /**
+   * 可访问名称（ARIA 命名链，覆盖对话框最常见来源）：
+   * aria-labelledby → aria-label → 关联 <legend>/标题 → title。
+   * @returns {{has:boolean, source:(string|null), value:string}}
+   */
+  function accessibleName(el) {
+    var v, i, ref, labelText;
+
+    v = el.getAttribute('aria-labelledby');
+    if (v) {
+      var ids = v.split(/\s+/);
+      var parts = [];
+      for (i = 0; i < ids.length; i++) {
+        ref = document.getElementById(ids[i]);
+        if (ref) parts.push((ref.textContent || '').trim().replace(/\s+/g, ' '));
+      }
+      labelText = parts.join(' ').trim();
+      if (labelText) return { has: true, source: 'aria-labelledby', value: labelText.slice(0, 80) };
+    }
+
+    v = (el.getAttribute('aria-label') || '').trim();
+    if (v) return { has: true, source: 'aria-label', value: v.replace(/\s+/g, ' ').slice(0, 80) };
+
+    // fieldset 的 legend、其他容器的首个 heading（兜底命名，非完整 accname 算法）
+    if (el.tagName === 'FIELDSET') {
+      var legend = el.querySelector('legend');
+      if (legend && (legend.textContent || '').trim()) {
+        return { has: true, source: 'legend', value: legend.textContent.trim().replace(/\s+/g, ' ').slice(0, 80) };
+      }
+    }
+    var heading = el.querySelector('h1,h2,h3,h4,h5,h6');
+    if (heading && (heading.textContent || '').trim()) {
+      return { has: true, source: 'heading', value: heading.textContent.trim().replace(/\s+/g, ' ').slice(0, 80) };
+    }
+
+    v = (el.getAttribute('title') || '').trim();
+    if (v) return { has: true, source: 'title', value: v.replace(/\s+/g, ' ').slice(0, 80) };
+
+    return { has: false, source: null, value: '' };
+  }
+
+  /** 元素当前是否可见（自身及祖先无 display:none，自身 visibility 非 hidden/collapse） */
+  function isVisible(el) {
+    var cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.visibility === 'collapse') return false;
+    var node = el.parentElement;
+    while (node && node.nodeType === 1) {
+      if (getComputedStyle(node).display === 'none') return false;
+      node = node.parentElement;
+    }
+    return true;
+  }
+
+  /** 元素的显式 / 隐式 ARIA 角色 */
+  function effectiveRole(el) {
+    var explicit = (el.getAttribute('role') || '').trim().toLowerCase().split(/\s+/)[0];
+    if (explicit) return explicit;
+    if (el.tagName === 'DIALOG') return 'dialog';
+    return '';
+  }
+
+  /**
+   * 收集当前可见的模态容器：dialog[open] 或 aria-modal="true"。
+   * @returns {Array<{el:Element, signals:string[]}>}
+   */
+  function collectVisibleModals() {
+    var found = [];
+    var dialogs = document.querySelectorAll('dialog[open]');
+    for (var i = 0; i < dialogs.length; i++) {
+      found.push({ el: dialogs[i], signals: ['dialog[open]'] });
+    }
+    var all = document.querySelectorAll('[aria-modal]');
+    for (var j = 0; j < all.length; j++) {
+      var el = all[j];
+      if (isAriaModalTrue(el)) {
+        var hit = null;
+        for (var k = 0; k < found.length; k++) {
+          if (found[k].el === el) { hit = found[k]; break; }
+        }
+        if (hit) hit.signals.push('aria-modal="true"');
+        else found.push({ el: el, signals: ['aria-modal="true"'] });
+      }
+    }
+    return found.filter(function (m) { return isVisible(m.el); });
+  }
+
+  /**
+   * 选出活动模态：嵌套时取最内层（含最多模态祖先）；
+   * 多个并列模态时按 DOM 顺序取最后一个（最近打开的近似）。
+   */
+  function pickActiveModal(modals) {
+    var active = null;
+    var maxDepth = -1;
+    var activeIndex = -1;
+    modals.forEach(function (m, i) {
+      var depth = 0;
+      for (var j = 0; j < modals.length; j++) {
+        if (j !== i && modals[j].el.contains(m.el)) depth++;
+      }
+      if (depth > maxDepth || (depth === maxDepth && i > activeIndex)) {
+        maxDepth = depth;
+        active = m;
+        activeIndex = i;
+      }
+    });
+    var otherCount = 0;
+    modals.forEach(function (m) {
+      if (m.el !== active.el && !active.el.contains(m.el) && !m.el.contains(active.el)) otherCount++;
+    });
+    return { el: active.el, signals: active.signals, ancestorCount: maxDepth, otherCount: otherCount, totalModals: modals.length };
+  }
+
+  /** 活动模态的序列化身份描述（供纯函数与导出报告使用） */
+  function describeModal(picked) {
+    var el = picked.el;
+    var d = describe(el);
+    return {
+      selector: stableSelector(el),
+      label: d.css,
+      tag: el.tagName.toLowerCase(),
+      role: effectiveRole(el),
+      signals: picked.signals,
+      accessibleName: accessibleName(el),
+      ancestorCount: picked.ancestorCount,
+      otherCount: picked.otherCount,
+      totalModals: picked.totalModals
+    };
+  }
+
+  /** 执行模态审计：检测活动模态并调用纯函数 computeModalAudit */
+  function buildModalAudit() {
+    var modals = collectVisibleModals();
+    if (modals.length === 0) return computeModalAudit(null, [], entries, order);
+    var picked = pickActiveModal(modals);
+    var modal = describeModal(picked);
+    var inside = entries.map(function (e) { return picked.el.contains(e.el); });
+    return computeModalAudit(modal, inside, entries, order);
+  }
+
   /** 扫描文档，构建候选节点数组 */
   function buildEntries() {
     entries = [];
@@ -553,6 +842,7 @@
         serialized[order[s]].step = s + 1;
       }
       var diagnostics = buildDiagnostics(entries, order);
+      var modalAudit = buildModalAudit();
       // Shadow DOM 提示
       var all = document.querySelectorAll('*');
       for (var i = 0; i < all.length; i++) {
@@ -570,6 +860,7 @@
           entries: serialized,
           order: order.map(function (idx) { return serialized[idx].selector; }),
           diagnostics: diagnostics,
+          modalAudit: modalAudit,
           stats: {
             candidates: entries.length,
             ordered: order.length,
@@ -660,6 +951,31 @@
     post({ type: 'highlighted', step: -1, selector: selector });
   }
 
+  /**
+   * 按 CSS 选择器高亮文档中任意元素（不必是候选节点），点线框展示。
+   * 供父页面「模态焦点陷阱审计」点击模态容器身份时联动定位。
+   */
+  function highlightAnySelector(selector, badgeText) {
+    var el = null;
+    try { el = document.querySelector(selector); } catch (err) { el = null; }
+    if (!el || !el.isConnected) {
+      post({ type: 'highlight-miss', selector: selector });
+      return;
+    }
+    ensureOverlay();
+    try { el.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) { /* 忽略 */ }
+    var r = el.getBoundingClientRect();
+    overlay.style.display = 'block';
+    overlay.style.borderStyle = 'dotted';
+    overlay.style.left = (r.left + window.pageXOffset - 3) + 'px';
+    overlay.style.top = (r.top + window.pageYOffset - 3) + 'px';
+    overlay.style.width = Math.max(r.width, 4) + 6 + 'px';
+    overlay.style.height = Math.max(r.height, 4) + 6 + 'px';
+    badge.textContent = badgeText || '活动模态';
+    currentStep = -1;
+    post({ type: 'highlighted', step: -1, selector: selector });
+  }
+
   /* ---------------- 通信 ---------------- */
 
   window.addEventListener('message', function (ev) {
@@ -669,6 +985,8 @@
       highlightStep(d.step);
     } else if (d.type === 'highlight-node') {
       highlightNodeBySelector(d.selector);
+    } else if (d.type === 'highlight-element') {
+      highlightAnySelector(d.selector, d.badge);
     } else if (d.type === 'clear') {
       clearHighlight();
     } else if (d.type === 'recompute') {

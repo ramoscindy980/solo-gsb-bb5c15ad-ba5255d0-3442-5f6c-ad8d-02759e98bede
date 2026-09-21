@@ -58,6 +58,7 @@
       <div class="tabs" role="tablist">
         <button class="tab active" id="tab-order" role="tab" aria-selected="true" type="button">顺序 <span id="order-count" class="count">0</span></button>
         <button class="tab" id="tab-excluded" role="tab" aria-selected="false" type="button">排除与诊断 <span id="excluded-count" class="count">0</span></button>
+        <button class="tab" id="tab-modal" role="tab" aria-selected="false" type="button">模态审计 <span id="modal-count" class="count">0</span></button>
         <button class="tab" id="tab-baseline" role="tab" aria-selected="false" type="button">基线对比 <span id="baseline-count" class="count">0</span></button>
       </div>
       <ol id="order-list" class="order-list" aria-label="Tab 顺序"></ol>
@@ -65,6 +66,26 @@
         <ul id="excluded-list" class="excluded-list"></ul>
         <h3>全局诊断</h3>
         <ul id="diagnostics-list" class="diagnostics-list"></ul>
+      </div>
+      <div id="modal-panel" class="modal-panel" hidden>
+        <p id="modal-empty" class="empty-tip" hidden>当前预览没有可见的 dialog[open] 或 aria-modal="true" 容器。</p>
+        <div id="modal-content" class="modal-content" hidden>
+          <div class="modal-identity card">
+            <h3>活动模态</h3>
+            <button id="modal-identity-btn" class="node-item modal-identity-btn" type="button"></button>
+            <ul id="modal-issues" class="modal-issues"></ul>
+          </div>
+          <div class="card">
+            <h3>焦点循环路线（模态内）<span id="modal-cycle-count" class="count">0</span></h3>
+            <p class="modal-hint">Tab 在首节点 ↔ 尾节点之间循环；点击节点联动预览高亮。</p>
+            <ol id="modal-cycle-list" class="modal-cycle-list"></ol>
+          </div>
+          <div class="card">
+            <h3>模态外泄漏节点 <span id="modal-leak-count" class="count">0</span></h3>
+            <p class="modal-hint">仍可从模态外 Tab 到达的节点；点击联动预览高亮。</p>
+            <ul id="modal-leak-list" class="modal-leak-list"></ul>
+          </div>
+        </div>
       </div>
       <div id="baseline-panel" class="baseline-panel" hidden>
         <div class="baseline-toolbar">

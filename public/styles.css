@@ -297,3 +297,105 @@ textarea:focus { outline: 2px solid var(--accent-2); outline-offset: -1px; }
   font-size: 12px;
   color: var(--accent-2);
 }
+
+/* ---------------- 模态焦点陷阱审计 ---------------- */
+
+.modal-panel { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
+.modal-content { display: flex; flex-direction: column; gap: 10px; }
+.modal-panel .card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.modal-panel .card h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.modal-hint { margin: 0 0 6px; color: var(--muted); font-size: 11.5px; }
+
+.modal-identity-btn { margin: 0 0 6px; }
+.modal-identity-meta { display: block; margin-top: 3px; color: var(--muted); font-size: 11.5px; }
+.modal-identity-meta .signal {
+  display: inline-block;
+  margin: 1px 4px 1px 0;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 10.5px;
+  font-family: var(--mono);
+  background: #22304d;
+  color: var(--accent-2);
+}
+.modal-name { color: var(--ok); }
+.modal-name.missing { color: var(--accent); }
+
+.modal-issues, .modal-leak-list, .modal-cycle-list {
+  margin: 0;
+  padding: 0 0 0 2px;
+  list-style: none;
+}
+.modal-issues .diag { margin-bottom: 5px; }
+
+.modal-cycle-list { counter-reset: mstep; }
+.modal-node {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 6px 9px;
+  margin-bottom: 5px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 12.5px;
+}
+.modal-node:hover { border-color: var(--accent-2); }
+.modal-node .step-no {
+  display: inline-block;
+  min-width: 22px;
+  color: var(--accent-2);
+  font-family: var(--mono);
+  font-weight: 700;
+}
+.modal-node .global-step { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+.modal-node.edge-first { border-left-color: var(--ok); }
+.modal-node.edge-last { border-left-color: var(--warn); }
+.modal-node.edge-first-last { border-left-color: #c792ea; }
+.edge-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 10.5px;
+  font-family: var(--mono);
+  background: #22304d;
+  color: var(--accent-2);
+}
+.edge-tag.first { background: #12352b; color: var(--ok); }
+.edge-tag.last { background: #3d2b12; color: var(--warn); }
+.edge-tag.first-last { background: #2d2440; color: #c792ea; }
+.modal-cycle-wrap {
+  display: block;
+  margin-top: 4px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--panel);
+}
+.modal-node .sel { font-family: var(--mono); color: var(--muted); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.modal-leak-list .modal-node { border-left-color: var(--accent); }
+.modal-leak-list .modal-node.leak-empty,
+.modal-cycle-list .leak-empty {
+  border-left-color: var(--border);
+  cursor: default;
+  color: var(--muted);
+}
+.modal-leak-list .modal-node.leak-empty:hover,
+.modal-cycle-list .leak-empty:hover { border-color: var(--border); }

@@ -5,7 +5,8 @@
 DOM 嵌套（`details`、`fieldset[disabled]` 等）推导 **Tab / Shift+Tab 焦点顺序**，
 逐步高亮节点，并解释元素被排除或顺序异常的原因。编辑内容后按**稳定选择器**恢复当前位置并重算路线，
 可将当前结果**钉为基线**，后续重算自动按**节点身份**对比前后路线（新增 / 移除 / 移位 / 状态切换），
-可一键导出「节点 / 顺序 / 诊断 / 基线对比」JSON 报告。
+并对当前可见的 `dialog[open]` / `aria-modal="true"` 容器进行**模态焦点陷阱审计**（最内层活动模态、
+首↔尾循环路线、模态外泄漏节点）；可一键导出「节点 / 顺序 / 诊断 / 模态审计 / 基线对比」JSON 报告。
 
 ## 快速开始（Docker）
 
@@ -72,8 +73,29 @@ npm run smoke      # 冒烟测试（需服务已启动）
   某类身份在两侧各出现恰好一次才视为匹配；在任一侧出现多次即为**歧义**，
   对应节点被明确标记为「未匹配」，不计入新增 / 移除。
   （`identity.path` 仍会导出 nth-of-type 结构路径，仅供排查展示，不参与匹配。）
+- **模态焦点陷阱审计**：结果区「模态审计」标签页。分析器在 iframe 内识别
+  **当前可见**的 `dialog[open]` 或 `aria-modal="true"` 容器（自身及祖先
+  `display:none` / `visibility:hidden` 者忽略）；存在嵌套时**只审计最内层
+  活动模态**（包含最多模态祖先，并列时取 DOM 顺序最后一个），并给出：
+  - **活动模态身份**：稳定选择器、标签、显式/隐式角色、判定信号、可访问名称
+    （`aria-labelledby` → `aria-label` → legend/标题 → `title`），点击身份卡
+    在预览中以点线框高亮模态容器；
+  - **焦点循环路线**：模态内可 Tab 节点按序组成的循环，标出「循环首 / 循环尾」
+    （仅 1 个节点时首=尾），并给出「尾按 Tab 回首、首 Shift+Tab 跳尾」说明，
+    点击任一节点联动预览高亮（复用全局 Tab 序号）；
+  - **泄漏节点**：仍可从模态外 Tab 到达的节点，按全局 Tab 序号列出；
+    原生 `<dialog>.showModal()` 会自动把外部子树置为 inert，而 `aria-modal`
+    仅是 ARIA 声明，静态 HTML（如示例）通常会出现泄漏，诊断中会解释差异；
+  - **问题诊断**：模态缺少可访问名称（`modal-no-name`）、模态内无可聚焦项
+    （`modal-empty`，含仅有 `tabindex<0` 节点的提示）、存在泄漏（`modal-leak`）、
+    检测到嵌套 / 并列模态（`modal-nested` / `modal-multiple`，info）、
+    `aria-modal="true"` 挂在非 dialog 角色上（`modal-aria-modal-role`，info）。
 - **导出 JSON**：`POST /api/export` 返回 `Content-Disposition: attachment` 的报告文件；
-  接口不可用时退化为浏览器本地下载。已钉基线时，报告包含
+  接口不可用时退化为浏览器本地下载。存在活动模态时，报告 `modalAudit` 字段包含
+  活动模态身份（选择器 / 标签 / 角色 / 信号 / 可访问名称 / 嵌套关系）、`cycle`
+  （首尾选择器与完整循环顺序，含各节点全局 Tab 序号）、`leaks`（泄漏节点）与
+  `diagnostics`（诊断码与说明）；无活动模态时 `modalAudit.active` 为 `false`。
+  已钉基线时，报告另外包含
   `baselineComparison` 字段：`baseline` / `current` 摘要（时间、统计、节点数）、
   `summary`（各类差异计数）、`matches`（匹配结果及所用身份层级 `uid`/`fp`）与
   `diffs`（逐条差异）。
@@ -83,10 +105,11 @@ npm run smoke      # 冒烟测试（需服务已启动）
 ```
 server.js                 Express：静态托管 + /api/health + /api/export
 public/index.html         应用外壳（编辑器 / 预览 / 结果三栏）
-public/app.js             父页面：净化、srcdoc 装配、postMessage 通信、渲染、基线面板、导出
-public/analyzer.js        注入 sandbox iframe：焦点模型计算、诊断、节点身份生成、高亮绘制
+public/app.js             父页面：净化、srcdoc 装配、postMessage 通信、渲染、模态审计面板、基线面板、导出
+public/analyzer.js        注入 sandbox iframe：焦点模型计算、诊断、模态焦点陷阱审计、节点身份生成、高亮绘制
 public/diff.js            基线对比纯函数：节点身份匹配（uid → 指纹 → 歧义未匹配）与差异计算
 test/analyzer.test.js     纯函数单元测试（tabindex 解析 / 排序 / 诊断）
+test/modal.test.js        模态审计纯函数单元测试（循环首尾 / 泄漏 / 诊断）
 test/diff.test.js         基线对比单元测试（身份匹配 / 移位 / 状态切换 / 歧义）
 test/smoke.js             冒烟测试
 Dockerfile                node:20-alpine，npm install --omit=dev

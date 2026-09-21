@@ -46,7 +46,18 @@
     baselineMeta: document.getElementById('baseline-meta'),
     diffSummary: document.getElementById('diff-summary'),
     diffList: document.getElementById('diff-list'),
-    diffHint: document.getElementById('diff-hint')
+    diffHint: document.getElementById('diff-hint'),
+    tabModal: document.getElementById('tab-modal'),
+    modalPanel: document.getElementById('modal-panel'),
+    modalCount: document.getElementById('modal-count'),
+    modalEmpty: document.getElementById('modal-empty'),
+    modalContent: document.getElementById('modal-content'),
+    modalIdentityBtn: document.getElementById('modal-identity-btn'),
+    modalIssues: document.getElementById('modal-issues'),
+    modalCycleList: document.getElementById('modal-cycle-list'),
+    modalCycleCount: document.getElementById('modal-cycle-count'),
+    modalLeakList: document.getElementById('modal-leak-list'),
+    modalLeakCount: document.getElementById('modal-leak-count')
   };
 
   var state = {
@@ -55,6 +66,7 @@
     order: [],           // selector 数组（Tab 顺序）
     diagnostics: [],
     stats: null,
+    modalAudit: null,    // 最近一次模态焦点陷阱审计结果
     currentStep: -1,     // 当前高亮在顺序中的下标
     restoreSelector: null, // 待恢复的稳定选择器
     routeTimer: null,    // 路线响应超时计时器
@@ -90,6 +102,14 @@
     '</fieldset>',
     '<a>没有 href 的链接（不可聚焦）</a>',
     '<div aria-hidden="true"><button>aria-hidden 内的可聚焦按钮</button></div>',
+    '<dialog open aria-labelledby="dlg-title">',
+    '  <h2 id="dlg-title">登录</h2>',
+    '  <label>账号 <input type="text" name="account"></label>',
+    '  <label>密码 <input type="password" name="pwd"></label>',
+    '  <button type="button" id="dlg-ok">确定</button>',
+    '  <button type="button">取消</button>',
+    '</dialog>',
+    '<button>模态外仍可 Tab 到达（泄漏）</button>',
     '<script>alert("这段用户脚本会被剥离，不会执行")<' + '/script>'
   ].join('\n');
 
@@ -97,7 +117,9 @@
     'body { font-family: sans-serif; padding: 12px; }',
     'button, a, input, summary, div[tabindex] { display: inline-block; margin: 4px; padding: 4px 8px; }',
     '.gone { display: none; }',
-    ':focus { outline: 2px dashed #4f8cff; }'
+    ':focus { outline: 2px dashed #4f8cff; }',
+    'dialog[open] { display: block; border: 2px solid #4f8cff; border-radius: 8px; padding: 12px; margin: 8px 0; }',
+    'dialog[open] label { display: block; margin: 6px 0; }'
   ].join('\n');
 
   /* ---------------- 净化：剥离用户脚本 ---------------- */
@@ -203,8 +225,10 @@
     state.order = payload.order || [];
     state.diagnostics = payload.diagnostics || [];
     state.stats = payload.stats || null;
+    state.modalAudit = payload.modalAudit || null;
     state.currentStep = -1;
     renderResults();
+    renderModalPanel();
     refreshDiff();
     setStatus('已计算：' + state.order.length + ' 个可聚焦节点', 'ok');
 
@@ -368,6 +392,185 @@
     }
     els.prevBtn.disabled = total === 0;
     els.nextBtn.disabled = total === 0;
+  }
+
+  /* ---------------- 模态焦点陷阱审计 ---------------- */
+
+  /** 点击循环 / 泄漏节点：它们都在全局 Tab 顺序中，按 1 基序号联动高亮 */
+  function highlightModalNode(node) {
+    if (node && node.step) {
+      sendToFrame({ type: 'highlight', step: node.step - 1 });
+    } else if (node && node.selector) {
+      sendToFrame({ type: 'highlight-node', selector: node.selector });
+    }
+  }
+
+  function renderModalNode(node, kind) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'modal-node' + (node.edge ? ' edge-' + node.edge : '');
+
+    var line = document.createElement('span');
+    if (kind === 'cycle') {
+      var no = document.createElement('span');
+      no.className = 'step-no';
+      no.textContent = String(node.position);
+      line.appendChild(no);
+    }
+    line.appendChild(document.createTextNode(' ' + node.label + ' '));
+
+    if (node.tabIndex > 0) {
+      var tb = document.createElement('span');
+      tb.className = 'badge positive';
+      tb.textContent = 'tabindex=' + node.tabIndex;
+      line.appendChild(tb);
+    }
+    if (kind === 'leak') {
+      var gs = document.createElement('span');
+      gs.className = 'global-step';
+      gs.textContent = '全局 Tab 第 ' + node.step + ' 位';
+      line.appendChild(gs);
+    } else {
+      var gs2 = document.createElement('span');
+      gs2.className = 'global-step';
+      gs2.textContent = '（全局第 ' + node.step + ' 位）';
+      line.appendChild(gs2);
+    }
+    if (node.edge) {
+      var tag = document.createElement('span');
+      tag.className = 'edge-tag ' + node.edge;
+      tag.textContent = node.edge === 'first' ? '循环首' :
+        (node.edge === 'last' ? '循环尾' : '首尾同一节点');
+      line.appendChild(tag);
+    }
+    btn.appendChild(line);
+
+    if (node.text) {
+      var t = document.createElement('span');
+      t.className = 'text';
+      t.textContent = '“' + node.text + '”';
+      btn.appendChild(t);
+    }
+    var sel = document.createElement('span');
+    sel.className = 'sel';
+    sel.textContent = node.selector;
+    btn.appendChild(sel);
+
+    btn.addEventListener('click', function () { highlightModalNode(node); });
+    return btn;
+  }
+
+  function renderModalPanel() {
+    var audit = state.modalAudit;
+    var active = audit && audit.active && audit.modal;
+
+    els.modalEmpty.hidden = !!active;
+    els.modalContent.hidden = !active;
+    els.modalCount.textContent = active
+      ? String((audit.diagnostics || []).filter(function (d) { return d.level === 'warn'; }).length)
+      : '0';
+
+    if (!active) return;
+
+    var modal = audit.modal;
+
+    // 活动模态身份（点击联动高亮模态容器）
+    els.modalIdentityBtn.innerHTML = '';
+    var line = document.createElement('span');
+    line.textContent = modal.label + ' ';
+    var roleBadge = document.createElement('span');
+    roleBadge.className = 'badge';
+    roleBadge.textContent = 'role=' + (modal.role || '(none)');
+    line.appendChild(roleBadge);
+    els.modalIdentityBtn.appendChild(line);
+
+    var name = modal.accessibleName || { has: false };
+    var meta = document.createElement('span');
+    meta.className = 'modal-identity-meta';
+    var nameText = document.createElement(name.has ? 'strong' : 'span');
+    nameText.className = 'modal-name' + (name.has ? '' : ' missing');
+    nameText.textContent = name.has
+      ? '可访问名称（' + name.source + '）：' + name.value
+      : '缺少可访问名称';
+    meta.appendChild(nameText);
+    meta.appendChild(document.createElement('br'));
+    modal.signals.forEach(function (sig) {
+      var s = document.createElement('span');
+      s.className = 'signal';
+      s.textContent = sig;
+      meta.appendChild(s);
+    });
+    var st = audit.stats || {};
+    meta.appendChild(document.createTextNode(
+      ' 可见模态 ' + st.totalModals + ' 个 · 模态内可 Tab ' + (st.insideTabbable || 0) +
+      ' · 泄漏 ' + (st.outsideTabbable || 0) +
+      (st.insideProgrammatic ? ' · 仅编程聚焦 ' + st.insideProgrammatic : '')
+    ));
+    var sel0 = document.createElement('span');
+    sel0.className = 'sel';
+    sel0.textContent = modal.selector;
+    meta.appendChild(sel0);
+    els.modalIdentityBtn.appendChild(meta);
+    els.modalIdentityBtn.onclick = function () {
+      sendToFrame({ type: 'highlight-element', selector: modal.selector, badge: '活动模态容器' });
+    };
+
+    // 问题诊断
+    els.modalIssues.innerHTML = '';
+    (audit.diagnostics || []).forEach(function (dg) {
+      var li = document.createElement('li');
+      li.className = 'diag ' + (dg.level === 'warn' ? 'warn' : 'info');
+      li.textContent = (dg.level === 'warn' ? '⚠ ' : 'ℹ ') + dg.message;
+      els.modalIssues.appendChild(li);
+    });
+
+    // 焦点循环路线
+    els.modalCycleList.innerHTML = '';
+    var cycle = audit.cycle || { nodes: [] };
+    els.modalCycleCount.textContent = String(cycle.nodes.length);
+    if (cycle.nodes.length === 0) {
+      var liEmpty = document.createElement('li');
+      liEmpty.className = 'modal-node leak-empty';
+      liEmpty.textContent = '模态内没有可 Tab 聚焦的节点，无法形成循环。';
+      els.modalCycleList.appendChild(liEmpty);
+    } else {
+      cycle.nodes.forEach(function (node) {
+        var li = document.createElement('li');
+        li.appendChild(renderModalNode(node, 'cycle'));
+        els.modalCycleList.appendChild(li);
+      });
+      var liWrap = document.createElement('li');
+      var wrap = document.createElement('span');
+      wrap.className = 'modal-cycle-wrap';
+      if (cycle.nodes.length === 1) {
+        wrap.textContent = '↻ 仅 1 个节点：Tab 与 Shift+Tab 都停留在「' +
+          (cycle.nodes[0].label || '') + '」自身。';
+      } else {
+        var first = cycle.nodes[0];
+        var last = cycle.nodes[cycle.nodes.length - 1];
+        wrap.textContent = '↻ 循环：尾节点「' + (last.label || '') + '」按 Tab 回到首节点「' +
+          (first.label || '') + '」；首节点 Shift+Tab 跳到尾节点。';
+      }
+      liWrap.appendChild(wrap);
+      els.modalCycleList.appendChild(liWrap);
+    }
+
+    // 泄漏节点
+    els.modalLeakList.innerHTML = '';
+    var leaks = audit.leaks || [];
+    els.modalLeakCount.textContent = String(leaks.length);
+    if (leaks.length === 0) {
+      var liOk = document.createElement('li');
+      liOk.className = 'modal-node leak-empty';
+      liOk.textContent = '✓ 模态外没有可 Tab 到达的节点，焦点不会泄漏。';
+      els.modalLeakList.appendChild(liOk);
+    } else {
+      leaks.forEach(function (node) {
+        var li = document.createElement('li');
+        li.appendChild(renderModalNode(node, 'leak'));
+        els.modalLeakList.appendChild(li);
+      });
+    }
   }
 
   /* ---------------- 基线对比 ---------------- */
@@ -639,6 +842,8 @@
         };
       }),
       diagnostics: state.diagnostics,
+      // 模态焦点陷阱审计：活动模态身份、首尾循环路线、泄漏节点与诊断（无活动模态时 active=false）
+      modalAudit: state.modalAudit || null,
       // 基线对比：基线摘要 + 匹配结果 + 差异（未钉基线时为 null）
       baselineComparison: state.diff ? {
         baseline: state.diff.baseline,
@@ -680,6 +885,7 @@
     var tabs = {
       order: [els.tabOrder, els.orderList],
       excluded: [els.tabExcluded, els.excludedPanel],
+      modal: [els.tabModal, els.modalPanel],
       baseline: [els.tabBaseline, els.baselinePanel]
     };
     Object.keys(tabs).forEach(function (name) {
@@ -691,6 +897,7 @@
   }
   els.tabOrder.addEventListener('click', function () { switchTab('order'); });
   els.tabExcluded.addEventListener('click', function () { switchTab('excluded'); });
+  els.tabModal.addEventListener('click', function () { switchTab('modal'); });
   els.tabBaseline.addEventListener('click', function () { switchTab('baseline'); });
 
   /* ---------------- 启动 ---------------- */
